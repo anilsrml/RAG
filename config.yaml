@@ -1,0 +1,47 @@
+# RAG PDF Chatbot Yapılandırma Dosyası
+
+# PDF İşleme Ayarları
+pdf:
+  max_file_size_mb: 50
+  supported_formats: [".pdf"]
+
+# Text Chunking Ayarları
+chunking:
+  chunk_size: 500
+  chunk_overlap: 150
+  separators: ["\n\n", "\n", ". ", " ", ""]
+
+# Embedding Ayarları
+embedding:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  # Alternatif modeller:
+  # - "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  # - "sentence-transformers/all-mpnet-base-v2"
+
+# Vektör Veritabanı Ayarları
+vector_db:
+  provider: "chromadb"
+  persist_directory: "./data/chroma_db"
+  collection_name_prefix: "pdf_collection"
+  similarity_metric: "cosine"  # cosine, l2, ip
+
+# RAG Ayarları
+rag:
+  top_k: 5  # Top-K benzer chunk sayısı
+  similarity_threshold: 0.5  # Minimum benzerlik skoru
+
+# LLM Ayarları
+llm:
+  provider: "ollama"
+  model_name: "mistral"
+  base_url: "http://localhost:11434"
+  temperature: 0.7
+  max_tokens: 1000
+  timeout: 30
+
+# CLI Ayarları
+cli:
+  show_sources: true
+  show_similarity_scores: true
+  streaming: false
+
