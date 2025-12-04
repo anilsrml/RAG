@@ -168,4 +168,3 @@ Bu proje eğitim amaçlıdır.
 ## Katkıda Bulunma
 
 Katkılarınızı bekliyoruz! Lütfen PR göndermeden önce kod standartlarına uyduğunuzdan emin olun.
-
