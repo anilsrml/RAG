@@ -1,13 +1,17 @@
 """
 RAG Chain Modülü
 RAG pipeline'ını yönetir.
+LangChain Chains kullanır.
 """
 
-from typing import List, Dict, Optional
-from .embeddings import EmbeddingGenerator
+from typing import List, Dict, Optional, Iterator
+from langchain.chains import RetrievalQA, ConversationalRetrievalChain
+from langchain.chains.retrieval_qa.base import BaseRetrievalQA
+from langchain.schema import Document
 from .vector_store import VectorStore
 from .llm_handler import OllamaLLMHandler
 from .prompt_templates import PromptTemplates
+from .memory import MemoryManager
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -15,30 +19,69 @@ logger = logging.getLogger(__name__)
 
 
 class RAGChain:
-    """RAG pipeline yöneticisi"""
+    """RAG pipeline yöneticisi - LangChain Chains kullanır"""
     
     def __init__(
         self,
-        embedding_generator: EmbeddingGenerator,
         vector_store: VectorStore,
         llm_handler: OllamaLLMHandler,
+        memory_manager: Optional[MemoryManager] = None,
+        chain_type: str = "stuff",
         top_k: int = 5,
-        similarity_threshold: float = 0.5
+        return_source_documents: bool = True
     ):
         """
         Args:
-            embedding_generator: Embedding generator instance
-            vector_store: Vector store instance
+            vector_store: Vector store instance (LangChain Chroma)
             llm_handler: LLM handler instance
+            memory_manager: Memory manager (opsiyonel, ConversationalRetrievalChain için)
+            chain_type: Chain tipi ("stuff", "map_reduce", "refine", "map_rerank")
             top_k: Top-K benzer chunk sayısı
-            similarity_threshold: Minimum benzerlik skoru
+            return_source_documents: Kaynak dokümanları döndür
         """
-        self.embedding_generator = embedding_generator
         self.vector_store = vector_store
         self.llm_handler = llm_handler
+        self.memory_manager = memory_manager
+        self.chain_type = chain_type
         self.top_k = top_k
-        self.similarity_threshold = similarity_threshold
+        self.return_source_documents = return_source_documents
         self.prompt_templates = PromptTemplates()
+        
+        # LangChain chain'i oluştur
+        self.chain = self._create_chain()
+    
+    def _create_chain(self) -> BaseRetrievalQA:
+        """LangChain chain'ini oluşturur"""
+        llm = self.llm_handler.get_langchain_llm()
+        retriever = self.vector_store.as_retriever(
+            search_kwargs={"k": self.top_k}
+        )
+        
+        if self.memory_manager:
+            # ConversationalRetrievalChain kullan (memory ile)
+            memory = self.memory_manager.get_memory()
+            chain = ConversationalRetrievalChain.from_llm(
+                llm=llm,
+                retriever=retriever,
+                memory=memory,
+                return_source_documents=self.return_source_documents,
+                verbose=True
+            )
+            logger.info("ConversationalRetrievalChain oluşturuldu")
+        else:
+            # RetrievalQA kullan (basit RAG)
+            prompt_template = self.prompt_templates.get_rag_template()
+            chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type=self.chain_type,
+                retriever=retriever,
+                return_source_documents=self.return_source_documents,
+                chain_type_kwargs={"prompt": prompt_template},
+                verbose=True
+            )
+            logger.info(f"RetrievalQA chain oluşturuldu (type: {self.chain_type})")
+        
+        return chain
     
     def query(self, question: str, filter_metadata: Optional[Dict] = None) -> Dict:
         """
@@ -46,95 +89,70 @@ class RAGChain:
         
         Args:
             question: Kullanıcı sorusu
-            filter_metadata: Metadata filtresi (opsiyonel)
+            filter_metadata: Metadata filtresi (opsiyonel, retriever'da kullanılabilir)
             
         Returns:
             Dict: {'answer': str, 'sources': List[Dict]}
         """
         logger.info(f"Soru işleniyor: {question[:50]}...")
         
-        # 1. Soruyu embedding'e dönüştür
-        query_embedding = self.embedding_generator.generate_embedding(question)
-        
-        # 2. Vektör DB'de arama yap
-        retrieved_chunks = self.vector_store.search(
-            query_embedding=query_embedding,
-            top_k=self.top_k,
-            filter_metadata=filter_metadata
-        )
-        
-        if not retrieved_chunks:
-            return {
-                'answer': 'İlgili bilgi bulunamadı.',
-                'sources': []
-            }
-        
-        # 3. Benzerlik skoruna göre filtrele
-        filtered_chunks = []
-        for chunk in retrieved_chunks:
-            distance = chunk.get('distance', 1.0)
-            similarity = 1 - distance  # Cosine distance -> similarity
-            if similarity >= self.similarity_threshold:
-                filtered_chunks.append(chunk)
-        
-        if not filtered_chunks:
-            return {
-                'answer': 'İlgili bilgi bulunamadı (benzerlik eşiğinin altında).',
-                'sources': []
-            }
-        
-        # 4. Context oluştur
-        context = self.prompt_templates.format_context(filtered_chunks)
-        
-        # 5. Prompt hazırla
-        prompt = self.prompt_templates.rag_prompt(context=context, question=question)
-        
-        # 6. LLM'e gönder
         try:
-            answer = self.llm_handler.generate(prompt, stream=False)
+            # LangChain chain'i kullan
+            if isinstance(self.chain, ConversationalRetrievalChain):
+                # ConversationalRetrievalChain için
+                result = self.chain({"question": question})
+                answer = result.get("answer", "")
+                source_documents = result.get("source_documents", [])
+            else:
+                # RetrievalQA için
+                result = self.chain({"query": question})
+                answer = result.get("result", "")
+                source_documents = result.get("source_documents", [])
+            
+            # Kaynakları formatla
+            sources = self.prompt_templates.format_sources(
+                chunks=[],
+                documents=source_documents
+            )
+            
+            return {
+                'answer': answer.strip() if answer else "Cevap oluşturulamadı.",
+                'sources': sources
+            }
+            
         except Exception as e:
-            logger.error(f"LLM hatası: {e}")
-            answer = "Üzgünüm, cevap oluşturulurken bir hata oluştu."
-        
-        # 7. Kaynakları formatla
-        sources = self.prompt_templates.format_sources(filtered_chunks)
-        
-        return {
-            'answer': answer.strip(),
-            'sources': sources
-        }
+            logger.error(f"RAG chain hatası: {e}")
+            return {
+                'answer': "Üzgünüm, cevap oluşturulurken bir hata oluştu.",
+                'sources': []
+            }
     
-    def query_streaming(self, question: str, filter_metadata: Optional[Dict] = None):
+    def query_streaming(self, question: str, filter_metadata: Optional[Dict] = None) -> Iterator[str]:
         """
-        Streaming modda RAG sorgusu (gelecekte kullanılabilir).
+        Streaming modda RAG sorgusu.
         
         Args:
             question: Kullanıcı sorusu
-            filter_metadata: Metadata filtresi
+            filter_metadata: Metadata filtresi (opsiyonel)
             
         Yields:
             str: Streaming cevap parçaları
         """
-        # 1-4. Aynı işlemler
-        query_embedding = self.embedding_generator.generate_embedding(question)
-        retrieved_chunks = self.vector_store.search(
-            query_embedding=query_embedding,
-            top_k=self.top_k,
-            filter_metadata=filter_metadata
-        )
-        
-        if not retrieved_chunks:
-            yield "İlgili bilgi bulunamadı."
-            return
-        
-        context = self.prompt_templates.format_context(retrieved_chunks)
-        prompt = self.prompt_templates.rag_prompt(context=context, question=question)
-        
-        # 5. Streaming response
         try:
-            for chunk in self.llm_handler.generate(prompt, stream=True):
-                yield chunk
+            # LangChain chain streaming
+            if isinstance(self.chain, ConversationalRetrievalChain):
+                for chunk in self.chain.stream({"question": question}):
+                    if "answer" in chunk:
+                        yield chunk["answer"]
+            else:
+                # RetrievalQA streaming desteği sınırlı
+                result = self.chain({"query": question})
+                answer = result.get("result", "")
+                # Basit streaming simülasyonu
+                words = answer.split()
+                for word in words:
+                    yield word + " "
         except Exception as e:
-            logger.error(f"LLM streaming hatası: {e}")
+            logger.error(f"RAG streaming hatası: {e}")
             yield "Üzgünüm, cevap oluşturulurken bir hata oluştu."
 

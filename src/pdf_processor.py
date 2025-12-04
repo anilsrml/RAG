@@ -1,12 +1,13 @@
 """
 PDF İşleme Modülü
 PDF dosyalarını yükler ve metin içeriğini çıkarır.
+LangChain Document Loader kullanır.
 """
 
 import os
 from typing import List, Dict, Optional
-import pdfplumber
-from pypdf import PdfReader
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.schema import Document
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -49,9 +50,45 @@ class PDFProcessor:
         
         return True
     
+    def load_documents(self, file_path: str) -> List[Document]:
+        """
+        PDF'den LangChain Document objelerini yükler.
+        
+        Args:
+            file_path: PDF dosya yolu
+            
+        Returns:
+            List[Document]: LangChain Document objeleri (sayfa numarası metadata ile)
+        """
+        self.validate_pdf(file_path)
+        
+        try:
+            # LangChain PyPDFLoader kullan
+            loader = PyPDFLoader(file_path)
+            documents = loader.load()
+            
+            # Sayfa numarası metadata'sını ekle
+            filename = os.path.basename(file_path)
+            for doc in documents:
+                if 'page' not in doc.metadata:
+                    # PyPDFLoader bazen page metadata eklemiyor, ekleyelim
+                    doc.metadata['source_file'] = filename
+                    doc.metadata['file_path'] = file_path
+                else:
+                    doc.metadata['source_file'] = filename
+                    doc.metadata['file_path'] = file_path
+            
+            logger.info(f"PDF yüklendi: {len(documents)} sayfa")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"PDF işleme hatası: {e}")
+            raise
+    
     def extract_text(self, file_path: str) -> List[Dict[str, any]]:
         """
         PDF'den metin içeriğini çıkarır ve sayfa bazlı döndürür.
+        (Backward compatibility için korunuyor)
         
         Args:
             file_path: PDF dosya yolu
@@ -59,50 +96,18 @@ class PDFProcessor:
         Returns:
             List[Dict]: Her sayfa için {'page': int, 'text': str} formatında liste
         """
-        self.validate_pdf(file_path)
+        documents = self.load_documents(file_path)
         
         pages_content = []
+        for doc in documents:
+            page_num = doc.metadata.get('page', 0)
+            if doc.page_content and doc.page_content.strip():
+                pages_content.append({
+                    'page': page_num,
+                    'text': doc.page_content.strip()
+                })
         
-        try:
-            # pdfplumber ile daha iyi metin çıkarma
-            with pdfplumber.open(file_path) as pdf:
-                total_pages = len(pdf.pages)
-                logger.info(f"PDF açıldı: {total_pages} sayfa")
-                
-                for page_num, page in enumerate(pdf.pages, start=1):
-                    try:
-                        text = page.extract_text()
-                        if text and text.strip():
-                            pages_content.append({
-                                'page': page_num,
-                                'text': text.strip()
-                            })
-                        else:
-                            logger.warning(f"Sayfa {page_num} boş veya metin çıkarılamadı")
-                    except Exception as e:
-                        logger.error(f"Sayfa {page_num} işlenirken hata: {e}")
-                        # Fallback: PyPDF2 ile dene
-                        try:
-                            reader = PdfReader(file_path)
-                            if page_num <= len(reader.pages):
-                                text = reader.pages[page_num - 1].extract_text()
-                                if text and text.strip():
-                                    pages_content.append({
-                                        'page': page_num,
-                                        'text': text.strip()
-                                    })
-                        except Exception as fallback_error:
-                            logger.error(f"Fallback başarısız (sayfa {page_num}): {fallback_error}")
-            
-            if not pages_content:
-                raise ValueError("PDF'den hiçbir metin çıkarılamadı. Dosya görüntü tabanlı olabilir (OCR gerekebilir).")
-            
-            logger.info(f"Toplam {len(pages_content)} sayfa işlendi")
-            return pages_content
-            
-        except Exception as e:
-            logger.error(f"PDF işleme hatası: {e}")
-            raise
+        return pages_content
     
     def get_pdf_info(self, file_path: str) -> Dict[str, any]:
         """
@@ -117,16 +122,17 @@ class PDFProcessor:
         self.validate_pdf(file_path)
         
         try:
-            with pdfplumber.open(file_path) as pdf:
-                total_pages = len(pdf.pages)
-                file_size = os.path.getsize(file_path)
-                
-                return {
-                    'filename': os.path.basename(file_path),
-                    'file_path': file_path,
-                    'total_pages': total_pages,
-                    'file_size_mb': round(file_size / 1024 / 1024, 2)
-                }
+            # LangChain loader ile sayfa sayısını al
+            documents = self.load_documents(file_path)
+            total_pages = len(documents)
+            file_size = os.path.getsize(file_path)
+            
+            return {
+                'filename': os.path.basename(file_path),
+                'file_path': file_path,
+                'total_pages': total_pages,
+                'file_size_mb': round(file_size / 1024 / 1024, 2)
+            }
         except Exception as e:
             logger.error(f"PDF bilgisi alınamadı: {e}")
             raise

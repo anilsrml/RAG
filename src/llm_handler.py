@@ -1,10 +1,12 @@
 """
 LLM Handler Modülü
 Ollama ile lokal LLM işlemleri.
+LangChain Ollama wrapper kullanır.
 """
 
-import requests
-from typing import Optional, Dict, Iterator, Union
+from typing import Optional, Iterator, Union
+from langchain_community.llms import Ollama
+from langchain_community.chat_models import ChatOllama
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -12,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaLLMHandler:
-    """Ollama LLM yöneticisi"""
+    """Ollama LLM yöneticisi - LangChain Ollama wrapper"""
     
     def __init__(
         self,
@@ -20,7 +22,8 @@ class OllamaLLMHandler:
         base_url: str = "http://localhost:11434",
         temperature: float = 0.7,
         max_tokens: int = 1000,
-        timeout: int = 30
+        timeout: int = 30,
+        use_chat: bool = False
     ):
         """
         Args:
@@ -29,36 +32,33 @@ class OllamaLLMHandler:
             temperature: Model temperature
             max_tokens: Maksimum token sayısı
             timeout: Request timeout (saniye)
+            use_chat: ChatOllama kullan (True) veya Ollama kullan (False)
         """
         self.model_name = model_name
         self.base_url = base_url.rstrip('/')
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
-        self.api_url = f"{self.base_url}/api/generate"
         
-        # Modelin mevcut olup olmadığını kontrol et
-        self._check_model_availability()
-    
-    def _check_model_availability(self):
-        """Modelin mevcut olup olmadığını kontrol eder"""
-        try:
-            response = requests.get(
-                f"{self.base_url}/api/tags",
-                timeout=self.timeout
+        # LangChain Ollama wrapper'ı başlat
+        if use_chat:
+            self.llm = ChatOllama(
+                model=model_name,
+                base_url=base_url,
+                temperature=temperature,
+                num_predict=max_tokens,
+                timeout=timeout
             )
-            if response.status_code == 200:
-                models = response.json().get('models', [])
-                model_names = [m.get('name', '') for m in models]
-                if self.model_name not in model_names:
-                    logger.warning(
-                        f"Model '{self.model_name}' bulunamadı. "
-                        f"Mevcut modeller: {', '.join(model_names)}"
-                    )
-                    logger.warning(f"Model yüklemek için: ollama pull {self.model_name}")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ollama API'ye bağlanılamadı: {e}")
-            logger.error("Ollama'nın çalıştığından emin olun: ollama serve")
+        else:
+            self.llm = Ollama(
+                model=model_name,
+                base_url=base_url,
+                temperature=temperature,
+                num_predict=max_tokens,
+                timeout=timeout
+            )
+        
+        logger.info(f"Ollama LLM başlatıldı: {model_name} ({'Chat' if use_chat else 'LLM'})")
     
     def generate(
         self,
@@ -75,57 +75,33 @@ class OllamaLLMHandler:
         Returns:
             str veya Iterator[str]: Cevap metni veya streaming iterator
         """
-        payload = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "stream": stream,
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.max_tokens
-            }
-        }
-        
         try:
-            response = requests.post(
-                self.api_url,
-                json=payload,
-                timeout=self.timeout,
-                stream=stream
-            )
-            response.raise_for_status()
-            
             if stream:
-                return self._handle_streaming_response(response)
+                # Streaming response
+                return self.llm.stream(prompt)
             else:
-                result = response.json()
-                return result.get('response', '')
+                # Normal response
+                return self.llm.invoke(prompt)
                 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.error(f"LLM çağrısı başarısız: {e}")
             raise
-    
-    def _handle_streaming_response(self, response) -> Iterator[str]:
-        """Streaming response'u işler"""
-        for line in response.iter_lines():
-            if line:
-                try:
-                    import json
-                    data = json.loads(line)
-                    if 'response' in data:
-                        yield data['response']
-                    if data.get('done', False):
-                        break
-                except json.JSONDecodeError:
-                    continue
     
     def test_connection(self) -> bool:
         """Ollama bağlantısını test eder"""
         try:
-            response = requests.get(
-                f"{self.base_url}/api/tags",
-                timeout=5
-            )
-            return response.status_code == 200
+            # Basit bir test çağrısı yap
+            test_response = self.llm.invoke("test")
+            return test_response is not None
         except Exception:
             return False
+    
+    def get_langchain_llm(self):
+        """
+        LangChain LLM objesini döndürür (Chains için).
+        
+        Returns:
+            LLM: LangChain LLM objesi
+        """
+        return self.llm
 

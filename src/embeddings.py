@@ -1,19 +1,20 @@
 """
 Embedding Modülü
 Metinleri vektörlere dönüştürür.
+LangChain HuggingFaceEmbeddings kullanır.
 """
 
-from typing import List, Union
-from sentence_transformers import SentenceTransformer
+from typing import List
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.embeddings.base import Embeddings
 import logging
-import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingGenerator:
-    """Embedding oluşturan sınıf"""
+    """Embedding oluşturan sınıf - LangChain HuggingFaceEmbeddings wrapper"""
     
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         """
@@ -22,7 +23,11 @@ class EmbeddingGenerator:
         """
         self.model_name = model_name
         logger.info(f"Embedding modeli yükleniyor: {model_name}")
-        self.model = SentenceTransformer(model_name)
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
         logger.info("Embedding modeli yüklendi")
     
     def generate_embedding(self, text: str) -> List[float]:
@@ -38,8 +43,8 @@ class EmbeddingGenerator:
         if not text or not text.strip():
             raise ValueError("Boş metin için embedding oluşturulamaz")
         
-        embedding = self.model.encode(text, normalize_embeddings=True)
-        return embedding.tolist()
+        embedding = self.embeddings.embed_query(text)
+        return embedding
     
     def generate_embeddings_batch(self, texts: List[str], show_progress: bool = True) -> List[List[float]]:
         """
@@ -47,7 +52,7 @@ class EmbeddingGenerator:
         
         Args:
             texts: Embedding oluşturulacak metin listesi
-            show_progress: İlerleme çubuğu göster
+            show_progress: İlerleme çubuğu göster (LangChain'de desteklenmiyor, parametre korunuyor)
             
         Returns:
             List[List[float]]: Embedding vektörleri listesi
@@ -62,15 +67,11 @@ class EmbeddingGenerator:
         
         logger.info(f"{len(valid_texts)} metin için embedding oluşturuluyor...")
         
-        embeddings = self.model.encode(
-            valid_texts,
-            normalize_embeddings=True,
-            show_progress_bar=show_progress,
-            batch_size=32
-        )
+        # LangChain'in embed_documents metodunu kullan
+        embeddings = self.embeddings.embed_documents(valid_texts)
         
         logger.info(f"{len(embeddings)} embedding oluşturuldu")
-        return embeddings.tolist()
+        return embeddings
     
     def get_embedding_dimension(self) -> int:
         """
@@ -82,4 +83,13 @@ class EmbeddingGenerator:
         # Test embedding ile boyutu öğren
         test_embedding = self.generate_embedding("test")
         return len(test_embedding)
+    
+    def get_langchain_embeddings(self) -> Embeddings:
+        """
+        LangChain Embeddings objesini döndürür (VectorStore için).
+        
+        Returns:
+            Embeddings: LangChain Embeddings objesi
+        """
+        return self.embeddings
 

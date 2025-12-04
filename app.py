@@ -17,6 +17,8 @@ from src.embeddings import EmbeddingGenerator
 from src.vector_store import VectorStore
 from src.llm_handler import OllamaLLMHandler
 from src.rag_chain import RAGChain
+from src.memory import MemoryManager
+from langchain.schema import Document
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,39 +74,59 @@ class RAGChatbot:
         model_name = os.getenv('EMBEDDING_MODEL') or embedding_config.get('model_name', 'sentence-transformers/all-MiniLM-L6-v2')
         self.embedding_generator = EmbeddingGenerator(model_name=model_name)
         
-        # Vector Store
+        # Vector Store (LangChain Chroma)
         vector_db_config = self.config.get('vector_db', {})
         persist_dir = os.getenv('CHROMA_PERSIST_DIRECTORY') or vector_db_config.get('persist_directory', './data/chroma_db')
         collection_name = vector_db_config.get('collection_name_prefix', 'pdf_collection')
         self.vector_store = VectorStore(
             persist_directory=persist_dir,
-            collection_name=collection_name
+            collection_name=collection_name,
+            embeddings=self.embedding_generator.get_langchain_embeddings()
         )
         
-        # LLM Handler
+        # LLM Handler (LangChain Ollama)
         llm_config = self.config.get('llm', {})
         base_url = os.getenv('OLLAMA_BASE_URL') or llm_config.get('base_url', 'http://localhost:11434')
         model_name = os.getenv('OLLAMA_MODEL') or llm_config.get('model_name', 'mistral')
+        use_chat = llm_config.get('use_chat', False)
         self.llm_handler = OllamaLLMHandler(
             model_name=model_name,
             base_url=base_url,
             temperature=llm_config.get('temperature', 0.7),
             max_tokens=llm_config.get('max_tokens', 1000),
-            timeout=llm_config.get('timeout', 30)
+            timeout=llm_config.get('timeout', 30),
+            use_chat=use_chat
         )
         
-        # RAG Chain
+        # Memory Manager (LangChain Memory)
+        memory_config = self.config.get('memory', {})
+        memory_enabled = memory_config.get('enabled', True)
+        if memory_enabled:
+            memory_type = memory_config.get('type', 'buffer')
+            window_size = memory_config.get('window_size', 10)
+            self.memory_manager = MemoryManager(
+                memory_type=memory_type,
+                window_size=window_size,
+                llm=self.llm_handler.get_langchain_llm() if memory_type == 'summary' else None
+            )
+        else:
+            self.memory_manager = None
+        
+        # RAG Chain (LangChain Chains)
         rag_config = self.config.get('rag', {})
+        chain_type = rag_config.get('chain_type', 'stuff')
+        return_source_documents = rag_config.get('return_source_documents', True)
         self.rag_chain = RAGChain(
-            embedding_generator=self.embedding_generator,
             vector_store=self.vector_store,
             llm_handler=self.llm_handler,
+            memory_manager=self.memory_manager,
+            chain_type=chain_type,
             top_k=rag_config.get('top_k', 5),
-            similarity_threshold=rag_config.get('similarity_threshold', 0.5)
+            return_source_documents=return_source_documents
         )
         
         self.current_collection_name = None  # Aktif collection adı
-        logger.info("Tüm bileşenler başlatıldı")
+        logger.info("Tüm bileşenler başlatıldı (LangChain entegrasyonu ile)")
     
     def load_pdf(self, pdf_path: str):
         """PDF dosyasını yükler ve işler"""
@@ -121,39 +143,48 @@ class RAGChatbot:
             print(f"Dosya Boyutu: {pdf_info['file_size_mb']} MB")
             print(f"{'='*50}\n")
             
-            # Metni çıkar
-            print("Metin çıkarılıyor...")
-            pages_content = self.pdf_processor.extract_text(pdf_path)
-            print(f"✓ {len(pages_content)} sayfa işlendi\n")
+            # LangChain Document Loader ile PDF yükle
+            print("PDF LangChain Document Loader ile yükleniyor...")
+            documents = self.pdf_processor.load_documents(pdf_path)
+            print(f"✓ {len(documents)} sayfa yüklendi\n")
             
-            # Chunk'lara böl
+            # Chunk'lara böl (LangChain TextSplitter ile)
             print("Metin chunk'lara bölünüyor...")
-            chunks = self.text_splitter.split_pages(pages_content, pdf_info['filename'])
-            print(f"✓ {len(chunks)} chunk oluşturuldu\n")
+            chunking_config = self.config.get('chunking', {})
+            from langchain.text_splitter import RecursiveCharacterTextSplitter
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunking_config.get('chunk_size', 500),
+                chunk_overlap=chunking_config.get('chunk_overlap', 150),
+                separators=chunking_config.get('separators', ["\n\n", "\n", ". ", " ", ""])
+            )
             
-            # Embedding oluştur
-            print("Embedding'ler oluşturuluyor...")
-            texts = [chunk['text'] for chunk in chunks]
-            embeddings = self.embedding_generator.generate_embeddings_batch(texts, show_progress=True)
-            print(f"✓ {len(embeddings)} embedding oluşturuldu\n")
-            
-            # Vektör DB'ye kaydet
-            print("Vektör veritabanına kaydediliyor...")
-            metadatas = [chunk['metadata'] for chunk in chunks]
-            ids = [f"{pdf_info['filename']}_chunk_{i+1}" for i in range(len(chunks))]
+            # Document'leri chunk'lara böl
+            chunked_documents = text_splitter.split_documents(documents)
+            print(f"✓ {len(chunked_documents)} chunk oluşturuldu\n")
             
             # Collection'ı PDF dosya adına göre oluştur/güncelle
             collection_name = f"pdf_{Path(pdf_info['filename']).stem}"
             self.vector_store.switch_collection(collection_name)
             self.current_collection_name = collection_name  # Aktif collection'ı kaydet
             
-            self.vector_store.add_documents(
-                texts=texts,
-                embeddings=embeddings,
-                metadatas=metadatas,
-                ids=ids
+            # Vektör DB'ye kaydet (LangChain Chroma ile)
+            print("Vektör veritabanına kaydediliyor...")
+            ids = [f"{pdf_info['filename']}_chunk_{i+1}" for i in range(len(chunked_documents))]
+            self.vector_store.add_documents(chunked_documents, ids=ids)
+            print(f"✓ {len(chunked_documents)} doküman kaydedildi\n")
+            
+            # RAG chain'i yeniden oluştur (yeni collection için)
+            rag_config = self.config.get('rag', {})
+            chain_type = rag_config.get('chain_type', 'stuff')
+            return_source_documents = rag_config.get('return_source_documents', True)
+            self.rag_chain = RAGChain(
+                vector_store=self.vector_store,
+                llm_handler=self.llm_handler,
+                memory_manager=self.memory_manager,
+                chain_type=chain_type,
+                top_k=rag_config.get('top_k', 5),
+                return_source_documents=return_source_documents
             )
-            print(f"✓ Dokümanlar kaydedildi\n")
             
             print(f"{'='*50}")
             print(f"✓ PDF başarıyla yüklendi ve işlendi!")
@@ -173,6 +204,8 @@ class RAGChatbot:
         if self.current_collection_name:
             # Son yüklenen PDF'in collection'ını kullan
             self.vector_store.switch_collection(self.current_collection_name)
+            # RAG chain'i yeniden oluştur
+            self._recreate_rag_chain()
             print(f"\n✓ Collection yüklendi: {self.current_collection_name}\n")
         else:
             # Mevcut collection'ları kontrol et
@@ -188,6 +221,7 @@ class RAGChatbot:
                 collection_name = collections_with_docs[0]['name']
                 self.vector_store.switch_collection(collection_name)
                 self.current_collection_name = collection_name
+                self._recreate_rag_chain()
                 print(f"\n✓ Collection yüklendi: {collection_name} ({collections_with_docs[0]['count']} doküman)\n")
             else:
                 # Birden fazla collection varsa kullanıcıya seçtir
@@ -203,6 +237,7 @@ class RAGChatbot:
                             collection_name = collections_with_docs[idx]['name']
                             self.vector_store.switch_collection(collection_name)
                             self.current_collection_name = collection_name
+                            self._recreate_rag_chain()
                             print(f"\n✓ Collection yüklendi: {collection_name}\n")
                             break
                         else:
@@ -213,10 +248,17 @@ class RAGChatbot:
                         print("\n\nİşlem iptal edildi.\n")
                         return
         
+        # Memory temizle (yeni sohbet başlatılıyor)
+        if self.memory_manager:
+            self.memory_manager.clear()
+        
         print("\n" + "="*50)
-        print("RAG PDF Sohbet Botu - Sohbet Modu")
+        print("RAG PDF Sohbet Botu - Sohbet Modu (LangChain)")
+        if self.memory_manager:
+            print(f"Memory: {self.memory_manager.memory_type}")
         print("="*50)
-        print("Çıkmak için '/exit' veya '/quit' yazın\n")
+        print("Çıkmak için '/exit' veya '/quit' yazın")
+        print("Memory'yi temizlemek için '/clear' yazın\n")
         
         while True:
             try:
@@ -229,7 +271,13 @@ class RAGChatbot:
                     print("\nSohbet sonlandırıldı.\n")
                     break
                 
-                # RAG sorgusu
+                if question.lower() == '/clear':
+                    if self.memory_manager:
+                        self.memory_manager.clear()
+                        print("\n✓ Memory temizlendi\n")
+                    continue
+                
+                # RAG sorgusu (LangChain chain ile)
                 result = self.rag_chain.query(question)
                 
                 # Cevabı göster
@@ -249,6 +297,20 @@ class RAGChatbot:
             except Exception as e:
                 logger.error(f"Sohbet hatası: {e}")
                 print(f"\n❌ Hata: {e}\n")
+    
+    def _recreate_rag_chain(self):
+        """RAG chain'i yeniden oluşturur (collection değiştiğinde)"""
+        rag_config = self.config.get('rag', {})
+        chain_type = rag_config.get('chain_type', 'stuff')
+        return_source_documents = rag_config.get('return_source_documents', True)
+        self.rag_chain = RAGChain(
+            vector_store=self.vector_store,
+            llm_handler=self.llm_handler,
+            memory_manager=self.memory_manager,
+            chain_type=chain_type,
+            top_k=rag_config.get('top_k', 5),
+            return_source_documents=return_source_documents
+        )
 
 
 def main():

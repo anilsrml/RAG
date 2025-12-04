@@ -1,14 +1,16 @@
-# RAG PDF Chatbot
+# RAG PDF Chatbot (LangChain Entegrasyonu)
 
-PDF dokümanlarını yükleyerek, lokalde çalışan bir dil modeli ile doküman içeriği hakkında soru sorabileceğiniz akıllı bir sohbet botu.
+PDF dokümanlarını yükleyerek, lokalde çalışan bir dil modeli ile doküman içeriği hakkında soru sorabileceğiniz akıllı bir sohbet botu. LangChain framework'ü ile geliştirilmiştir.
 
 ## Özellikler
 
-- 📄 PDF dosyalarını yükleme ve işleme
-- 🔍 Semantik arama ile ilgili bilgileri bulma
-- 💬 Lokal LLM (Ollama) ile sohbet
+- 📄 PDF dosyalarını yükleme ve işleme (LangChain Document Loaders)
+- 🔍 Semantik arama ile ilgili bilgileri bulma (LangChain Chroma)
+- 💬 Lokal LLM (Ollama) ile sohbet (LangChain Ollama wrapper)
 - 📚 Kaynak gösterimi (sayfa numaraları ve benzerlik skorları)
 - 🔒 Tamamen lokal çalışma (veri güvenliği)
+- 🧠 Sohbet geçmişi yönetimi (LangChain Memory)
+- ⛓️ Modüler RAG chains (RetrievalQA ve ConversationalRetrievalChain)
 
 ## Gereksinimler
 
@@ -47,10 +49,13 @@ cp .env.example .env
 ### 3. Yapılandırma
 
 `config.yaml` dosyasını ihtiyacınıza göre düzenleyebilirsiniz:
-- Chunk boyutu
-- Top-K değeri
-- LLM modeli
-- Embedding modeli
+- **Chunk boyutu**: 500 (varsayılan)
+- **Top-K değeri**: 5 (varsayılan)
+- **LLM modeli**: mistral (varsayılan)
+- **Embedding modeli**: all-MiniLM-L6-v2 (varsayılan)
+- **Chain type**: stuff, map_reduce, refine, map_rerank
+- **Memory type**: buffer, window, summary
+- **Memory enabled**: true/false
 
 ## Kullanım
 
@@ -82,6 +87,7 @@ python app.py chat
 
 - Normal soru sorun: `PDF'de ana konu nedir?`
 - Çıkmak için: `/exit`, `/quit` veya `/çıkış`
+- Memory'yi temizlemek için: `/clear`
 
 ## Proje Yapısı
 
@@ -96,13 +102,14 @@ rag-pdf-chatbot/
 │
 ├── src/
 │   ├── __init__.py
-│   ├── pdf_processor.py        # PDF yükleme ve işleme
-│   ├── text_splitter.py        # Chunking logic
-│   ├── embeddings.py           # Embedding oluşturma
-│   ├── vector_store.py         # ChromaDB işlemleri
-│   ├── llm_handler.py          # Ollama LLM işlemleri
-│   ├── rag_chain.py            # RAG pipeline
-│   └── prompt_templates.py     # Prompt şablonları
+│   ├── pdf_processor.py        # PDF yükleme (LangChain PyPDFLoader)
+│   ├── text_splitter.py        # Chunking logic (LangChain TextSplitter)
+│   ├── embeddings.py           # Embedding (LangChain HuggingFaceEmbeddings)
+│   ├── vector_store.py         # ChromaDB (LangChain Chroma wrapper)
+│   ├── llm_handler.py          # Ollama LLM (LangChain Ollama wrapper)
+│   ├── rag_chain.py            # RAG chains (RetrievalQA/ConversationalRetrievalChain)
+│   ├── prompt_templates.py     # Prompt şablonları (LangChain PromptTemplate)
+│   └── memory.py               # Conversation Memory (LangChain Memory)
 │
 ├── data/
 │   ├── uploads/                # Yüklenen PDF'ler (opsiyonel)
@@ -114,14 +121,24 @@ rag-pdf-chatbot/
 
 ## Teknik Detaylar
 
-### Mimari
+### Mimari (LangChain Framework)
 
-1. **PDF İşleme**: pdfplumber ile metin çıkarma
+1. **PDF İşleme**: LangChain PyPDFLoader
 2. **Chunking**: LangChain RecursiveCharacterTextSplitter
-3. **Embedding**: sentence-transformers (all-MiniLM-L6-v2)
-4. **Vektör DB**: ChromaDB (cosine similarity)
-5. **LLM**: Ollama (Mistral modeli)
-6. **RAG Pipeline**: Query → Embed → Search → Generate
+3. **Embedding**: LangChain HuggingFaceEmbeddings (all-MiniLM-L6-v2)
+4. **Vektör DB**: LangChain Chroma wrapper (cosine similarity)
+5. **LLM**: LangChain Ollama wrapper (Mistral modeli)
+6. **RAG Chains**: RetrievalQA (basit RAG) veya ConversationalRetrievalChain (memory ile)
+7. **Memory**: ConversationBufferMemory, ConversationBufferWindowMemory veya ConversationSummaryMemory
+
+### LangChain Entegrasyonu
+
+Bu proje LangChain framework'ü kullanarak:
+- **Standartlaşma**: LangChain'in standart API'lerini kullanır
+- **Modülerlik**: Farklı LLM'ler ve vector store'lar kolayca değiştirilebilir
+- **Memory Desteği**: Sohbet geçmişi otomatik yönetilir
+- **Chain Flexibility**: Farklı RAG stratejileri (stuff, map_reduce, refine, map_rerank)
+- **Production Ready**: LangChain'in production-ready özellikleri
 
 ### Varsayılan Ayarlar
 
@@ -129,7 +146,30 @@ rag-pdf-chatbot/
 - Chunk overlap: 150 karakter
 - Top-K: 5 chunk
 - Temperature: 0.7
-- Similarity threshold: 0.5
+- Chain type: stuff
+- Memory type: buffer
+- Memory enabled: true
+
+## LangChain Chain Tipleri
+
+### RetrievalQA (Basit RAG)
+Tek soru-cevap için kullanılır. Memory devre dışı olduğunda aktiftir.
+- **stuff**: Tüm dokümanları tek prompt'ta kullanır (hızlı, kısa dokümanlar için)
+- **map_reduce**: Her dokümanı ayrı işler, sonra birleştirir (uzun dokümanlar için)
+- **refine**: İteratif olarak cevabı iyileştirir
+- **map_rerank**: Her doküman için skor verir, en iyisini seçer
+
+### ConversationalRetrievalChain (Memory ile RAG)
+Çoklu tur sohbet için kullanılır. Memory aktif olduğunda otomatik seçilir.
+- Sohbet geçmişini tutar
+- Bağlamsal sorular sorabilirsiniz
+- "Bunu açıkla", "Daha fazla anlat" gibi takip soruları
+
+## Memory Tipleri
+
+- **buffer**: Tüm sohbet geçmişini tutar
+- **window**: Son N mesajı tutar (performans için, config'de `window_size` ile ayarlanır)
+- **summary**: Geçmişi özetler (uzun sohbetler için, LLM gerektirir)
 
 ## Sorun Giderme
 
@@ -160,6 +200,21 @@ ollama pull mistral
 Bazı PDF'ler görüntü tabanlıdır ve OCR gerektirebilir. Bu durumda:
 - PDF'i OCR ile işleyin
 - Veya metin tabanlı bir PDF kullanın
+
+### LangChain Import Hataları
+
+Eğer import hataları alıyorsanız:
+```bash
+pip install --upgrade langchain langchain-community langchain-chroma
+```
+
+### Memory Çalışmıyor
+
+Memory'yi devre dışı bırakmak için `config.yaml`:
+```yaml
+memory:
+  enabled: false
+```
 
 ## Lisans
 

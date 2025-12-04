@@ -1,12 +1,14 @@
 """
 Vektör Veritabanı Modülü
 ChromaDB ile vektör saklama ve arama işlemleri.
+LangChain Chroma wrapper kullanır.
 """
 
 import os
 from typing import List, Dict, Optional
-import chromadb
-from chromadb.config import Settings
+from langchain_chroma import Chroma
+from langchain.schema import Document
+from langchain.embeddings.base import Embeddings
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -14,49 +16,79 @@ logger = logging.getLogger(__name__)
 
 
 class VectorStore:
-    """ChromaDB vektör veritabanı yöneticisi"""
+    """ChromaDB vektör veritabanı yöneticisi - LangChain Chroma wrapper"""
     
     def __init__(
         self,
         persist_directory: str = "./data/chroma_db",
-        collection_name: str = "pdf_collection"
+        collection_name: str = "pdf_collection",
+        embeddings: Optional[Embeddings] = None
     ):
         """
         Args:
             persist_directory: ChromaDB kalıcı depolama dizini
             collection_name: Collection adı
+            embeddings: LangChain Embeddings objesi (opsiyonel, sonra set edilebilir)
         """
         self.persist_directory = persist_directory
         self.collection_name = collection_name
+        self._embeddings = embeddings
         
         # Dizini oluştur
         os.makedirs(persist_directory, exist_ok=True)
         
-        # ChromaDB client oluştur
-        self.client = chromadb.PersistentClient(
-            path=persist_directory,
-            settings=Settings(anonymized_telemetry=False)
-        )
+        # LangChain Chroma wrapper'ı başlat
+        if embeddings:
+            self.vectorstore = Chroma(
+                persist_directory=persist_directory,
+                collection_name=collection_name,
+                embedding_function=embeddings
+            )
+        else:
+            # Embeddings sonra set edilecek
+            self.vectorstore = None
         
-        # Collection'ı al veya oluştur
-        self.collection = self._get_or_create_collection(collection_name)
         logger.info(f"VectorStore başlatıldı: {collection_name}")
     
-    def _get_or_create_collection(self, name: str):
-        """Collection'ı al veya oluştur"""
-        try:
-            collection = self.client.get_collection(name=name)
-            logger.info(f"Mevcut collection yüklendi: {name}")
-            return collection
-        except Exception:
-            collection = self.client.create_collection(
-                name=name,
-                metadata={"hnsw:space": "cosine"}  # Cosine similarity
-            )
-            logger.info(f"Yeni collection oluşturuldu: {name}")
-            return collection
+    def set_embeddings(self, embeddings: Embeddings):
+        """Embeddings'i set et (lazy initialization için)"""
+        self._embeddings = embeddings
+        self.vectorstore = Chroma(
+            persist_directory=self.persist_directory,
+            collection_name=self.collection_name,
+            embedding_function=embeddings
+        )
+        logger.info("Embeddings set edildi")
     
     def add_documents(
+        self,
+        documents: List[Document],
+        ids: Optional[List[str]] = None
+    ):
+        """
+        LangChain Document objelerini vektör veritabanına ekler.
+        
+        Args:
+            documents: LangChain Document listesi
+            ids: Özel ID'ler (opsiyonel)
+        """
+        if not documents:
+            raise ValueError("Documents boş olamaz")
+        
+        if not self.vectorstore:
+            raise ValueError("Embeddings set edilmemiş. set_embeddings() çağırın.")
+        
+        logger.info(f"{len(documents)} doküman ekleniyor...")
+        
+        # LangChain Chroma'nın add_documents metodunu kullan
+        if ids:
+            self.vectorstore.add_documents(documents=documents, ids=ids)
+        else:
+            self.vectorstore.add_documents(documents=documents)
+        
+        logger.info(f"{len(documents)} doküman eklendi")
+    
+    def add_texts_with_metadata(
         self,
         texts: List[str],
         embeddings: List[List[float]],
@@ -64,34 +96,54 @@ class VectorStore:
         ids: Optional[List[str]] = None
     ):
         """
+        Backward compatibility için - eski API'yi destekler.
         Dokümanları vektör veritabanına ekler.
         
         Args:
             texts: Metin listesi
-            embeddings: Embedding vektörleri
+            embeddings: Embedding vektörleri (kullanılmaz, LangChain otomatik oluşturur)
             metadatas: Metadata listesi
             ids: Özel ID'ler (opsiyonel)
         """
-        if not texts or not embeddings or not metadatas:
-            raise ValueError("Texts, embeddings ve metadatas boş olamaz")
+        if not texts or not metadatas:
+            raise ValueError("Texts ve metadatas boş olamaz")
         
-        if len(texts) != len(embeddings) or len(texts) != len(metadatas):
-            raise ValueError("Texts, embeddings ve metadatas aynı uzunlukta olmalı")
+        if len(texts) != len(metadatas):
+            raise ValueError("Texts ve metadatas aynı uzunlukta olmalı")
         
-        # ID'leri oluştur
-        if ids is None:
-            ids = [f"chunk_{i+1}" for i in range(len(texts))]
+        # Document objelerine dönüştür
+        documents = []
+        for i, (text, metadata) in enumerate(zip(texts, metadatas)):
+            doc_id = ids[i] if ids and i < len(ids) else None
+            doc = Document(page_content=text, metadata=metadata)
+            documents.append(doc)
         
-        logger.info(f"{len(texts)} doküman ekleniyor...")
+        self.add_documents(documents, ids=ids)
+    
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int = 5,
+        filter: Optional[Dict] = None
+    ) -> List[tuple]:
+        """
+        LangChain'in similarity_search_with_score metodunu kullanır.
         
-        self.collection.add(
-            embeddings=embeddings,
-            documents=texts,
-            metadatas=metadatas,
-            ids=ids
-        )
+        Args:
+            query: Sorgu metni
+            k: Döndürülecek en iyi sonuç sayısı
+            filter: Metadata filtresi (opsiyonel)
+            
+        Returns:
+            List[tuple]: (Document, score) tuple listesi
+        """
+        if not self.vectorstore:
+            raise ValueError("Embeddings set edilmemiş. set_embeddings() çağırın.")
         
-        logger.info(f"{len(texts)} doküman eklendi")
+        if filter:
+            return self.vectorstore.similarity_search_with_score(query, k=k, filter=filter)
+        else:
+            return self.vectorstore.similarity_search_with_score(query, k=k)
     
     def search(
         self,
@@ -100,37 +152,23 @@ class VectorStore:
         filter_metadata: Optional[Dict] = None
     ) -> List[Dict]:
         """
+        Backward compatibility için - eski API'yi destekler.
         Vektör veritabanında arama yapar.
         
         Args:
-            query_embedding: Sorgu embedding vektörü
+            query_embedding: Sorgu embedding vektörü (kullanılmaz, query string gerekli)
             top_k: Döndürülecek en iyi sonuç sayısı
             filter_metadata: Metadata filtresi (opsiyonel)
             
         Returns:
             List[Dict]: Her sonuç için {'text': str, 'metadata': dict, 'distance': float}
         """
-        where_clause = filter_metadata if filter_metadata else None
-        
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            where=where_clause
+        # Bu metod artık kullanılmamalı, similarity_search_with_score kullanılmalı
+        # Ama backward compatibility için korunuyor
+        raise NotImplementedError(
+            "Bu metod artık desteklenmiyor. "
+            "query string ile similarity_search_with_score() kullanın."
         )
-        
-        # Sonuçları formatla
-        formatted_results = []
-        
-        if results['documents'] and results['documents'][0]:
-            for i in range(len(results['documents'][0])):
-                formatted_results.append({
-                    'text': results['documents'][0][i],
-                    'metadata': results['metadatas'][0][i],
-                    'distance': results['distances'][0][i] if results['distances'] else None,
-                    'id': results['ids'][0][i] if results['ids'] else None
-                })
-        
-        return formatted_results
     
     def delete_collection(self):
         """Collection'ı siler"""
@@ -142,7 +180,16 @@ class VectorStore:
     
     def get_collection_info(self) -> Dict:
         """Collection hakkında bilgi döndürür"""
-        count = self.collection.count()
+        if not self.vectorstore:
+            return {
+                'collection_name': self.collection_name,
+                'document_count': 0,
+                'persist_directory': self.persist_directory
+            }
+        
+        # Chroma collection'a eriş
+        collection = self.vectorstore._collection
+        count = collection.count()
         return {
             'collection_name': self.collection_name,
             'document_count': count,
@@ -152,13 +199,34 @@ class VectorStore:
     def reset_collection(self):
         """Collection'ı sıfırlar (tüm dokümanları siler)"""
         self.delete_collection()
-        self.collection = self._get_or_create_collection(self.collection_name)
+        if self._embeddings:
+            self.vectorstore = Chroma(
+                persist_directory=self.persist_directory,
+                collection_name=self.collection_name,
+                embedding_function=self._embeddings
+            )
         logger.info("Collection sıfırlandı")
+    
+    def delete_collection(self):
+        """Collection'ı siler"""
+        try:
+            if self.vectorstore:
+                # Chroma collection'ı sil
+                self.vectorstore.delete_collection()
+            logger.info(f"Collection silindi: {self.collection_name}")
+        except Exception as e:
+            logger.error(f"Collection silinirken hata: {e}")
     
     def list_collections(self) -> List[Dict]:
         """Tüm collection'ları listeler"""
         try:
-            collections = self.client.list_collections()
+            from langchain_chroma import Chroma
+            import chromadb
+            
+            # ChromaDB client oluştur
+            client = chromadb.PersistentClient(path=self.persist_directory)
+            collections = client.list_collections()
+            
             result = []
             for col in collections:
                 try:
@@ -177,6 +245,26 @@ class VectorStore:
     def switch_collection(self, collection_name: str):
         """Aktif collection'ı değiştirir"""
         self.collection_name = collection_name
-        self.collection = self._get_or_create_collection(collection_name)
+        if self._embeddings:
+            self.vectorstore = Chroma(
+                persist_directory=self.persist_directory,
+                collection_name=collection_name,
+                embedding_function=self._embeddings
+            )
         logger.info(f"Collection değiştirildi: {collection_name}")
+    
+    def as_retriever(self, **kwargs):
+        """
+        LangChain retriever oluşturur (Chains için gerekli).
+        
+        Args:
+            **kwargs: Retriever parametreleri (search_kwargs, vb.)
+            
+        Returns:
+            VectorStoreRetriever: LangChain retriever objesi
+        """
+        if not self.vectorstore:
+            raise ValueError("Embeddings set edilmemiş. set_embeddings() çağırın.")
+        
+        return self.vectorstore.as_retriever(**kwargs)
 

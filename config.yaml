@@ -29,6 +29,8 @@ vector_db:
 rag:
   top_k: 5  # Top-K benzer chunk sayısı
   similarity_threshold: 0.5  # Minimum benzerlik skoru
+  chain_type: "stuff"  # LangChain chain tipi: stuff, map_reduce, refine, map_rerank
+  return_source_documents: true  # Kaynak dokümanları döndür
 
 # LLM Ayarları
 llm:
@@ -38,6 +40,13 @@ llm:
   temperature: 0.7
   max_tokens: 1000
   timeout: 30
+  use_chat: false  # ChatOllama kullan (true) veya Ollama kullan (false)
+
+# Memory Ayarları (LangChain)
+memory:
+  type: "buffer"  # buffer, window, summary
+  window_size: 10  # Window memory için pencere boyutu
+  enabled: true  # Memory aktif mi
 
 # CLI Ayarları
 cli:
